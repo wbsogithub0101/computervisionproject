@@ -1,0 +1,159 @@
+#this is a computer vision project submitted for class, that endeavors to use neural networks to classify images based on yes/no occurrence of pneumonia.
+#This makes use of sklearn, keras, tensorflow, matplotlib
+#original files were made in my Google Colab
+# SOURCE CODE: https://github.com/PacktPublishing/Hands-On-Computer-Vision-with-TensorFlow-2/blob/master/Chapter04/ch4_nb2_reuse_models_from_keras_apps.ipynb
+import tensorflow as tf
+import os
+from matplotlib import pyplot as plt
+import math
+import numpy as np
+import pandas as pd
+import cv2
+import seaborn as sns
+from tqdm import tqdm
+from sklearn.utils import shuffle
+from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score, confusion_matrix
+import keras
+from keras.preprocessing import image
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.applications import ResNet50V2
+import warnings
+warnings.filterwarnings("ignore")
+
+# Choosing which GPU this notebook can access
+# (useful when running multiple experiments in parallel, on different GPUs):
+os.environ["CUDA_VISIBLE_DEVICES"]= "0"
+
+# Some hyper-parameters:
+input_shape = [224, 224, 3] # We will resize the input images to this shape
+batch_size  = 32            # Images per batch (reduce/increase according to the machine's capability)
+num_epochs  = 300           # Max number of training epochs
+random_seed = 42            # Seed for some random operations, for reproducibility
+
+#SOURCE DATA: https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia/data
+#number of chest Xrays in train folder: 1341 normal, 3875 pneumonia
+#number of chest Xrays in test folder: 234 normal, 390 pneumonia
+
+#INSTRUCTIONS UPLOADING KAGGLE DATASET TO GOOGLE COLAB: https://www.geeksforgeeks.org/how-to-import-kaggle-datasets-directly-into-google-colab/
+!pip install opendatasets
+!pip install pandas
+import opendatasets as od
+import pandas
+od.download(
+    "https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia/data")
+
+# Number of classes:
+num_classes = 2
+class_names = ['NORMAL', 'PNEUMONIA']
+# Number of images:
+num_train_imgs = 1341 + 3875
+num_val_imgs = 234 + 390
+#SOURCE CODE FOR TRAIN STEPS CALCULATIONS: https://github.com/PacktPublishing/Hands-On-Computer-Vision-with-TensorFlow-2/blob/master/Chapter04/ch4_nb2_reuse_models_from_keras_apps.ipynb
+train_steps_per_epoch = math.ceil(num_train_imgs / batch_size)
+val_steps_per_epoch   = math.ceil(num_val_imgs / batch_size)
+
+#CODE HELP SOURCE FROM TENSORFLOW DOCUMENTATION: https://www.tensorflow.org/api_docs/python/tf/keras/utils/image_dataset_from_directory
+# CODE HELP SOURCE FROM TENSORFLOW DOCUMENTATION: https://www.tensorflow.org/tutorials/load_data/images
+#MAKING THE TrainING SET
+#in this project we focus on using the dataset from chest-xray train which is further subdivided into 0.2-0.8 split of training and testing
+#Then calling image_dataset_from_directory(main_directory, labels='inferred') will return a tf.data.Dataset that yields batches of images from the subdirectories class_a and class_b, together with labels 0 and 1 (0 corresponding to class_a and 1 corresponding to class_b).
+train_ds = tf.keras.utils.image_dataset_from_directory(
+  "/content/chest-xray-pneumonia/chest_xray/train/",
+  labels='inferred',
+  validation_split=0.2,
+  subset="training",
+  seed=random_seed,
+  image_size=(224, 224),
+  batch_size=batch_size, shuffle=True,
+    )
+
+#CODE HELP SOURCE FROM TENSORFLOW DOCUMENTATION: https://www.tensorflow.org/api_docs/python/tf/keras/utils/image_dataset_from_directory
+# https://www.tensorflow.org/tutorials/load_data/images
+#in this project we focus on using the dataset from chest-xray train which is further subdivided into 0.2-0.8 split of training and testing
+#Then calling image_dataset_from_directory(main_directory, labels='inferred') will return a tf.data.Dataset that yields batches of images from the subdirectories class_a and class_b, together with labels 0 and 1 (0 corresponding to class_a and 1 corresponding to class_b).
+test_ds = tf.keras.utils.image_dataset_from_directory(
+  "/content/chest-xray-pneumonia/chest_xray/train/",
+  labels='inferred',
+  validation_split=0.2,
+  subset="validation",
+  seed=random_seed,
+  image_size=(224, 224),
+  batch_size=batch_size, shuffle=True,
+    )
+
+#SOURCE CODE FOR PLOTTING: https://www.tensorflow.org/tutorials/load_data/images
+#visualizing first nine images from the training set
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(10, 10))
+for images, labels in train_ds.take(1):
+  for i in range(15):
+    ax = plt.subplot(5, 3, i + 1)
+    plt.imshow(images[i].numpy().astype("uint8"))
+    plt.title(class_names[labels[i]])
+    plt.axis("off")
+
+#INITIATE RESNET
+#source code: https://github.com/PacktPublishing/Hands-On-Computer-Vision-with-TensorFlow-2/blob/9a73003eff274f288d59dfb1532a5a48655bfaa3/Chapter04/ch4_nb1_implement_resnet_from_scratch.ipynb
+model1 = tf.keras.applications.resnet50.ResNet50(
+    include_top=True, weights=None,
+    input_shape=input_shape, classes=num_classes)
+model = tf.keras.applications.vgg16.VGG16(
+    include_top=True, weights=None,
+    input_shape=input_shape, classes=num_classes)
+model.summary()
+
+#standardizing the data
+#standardize RGB channels from [0,255] to [0,1]
+#source: https://www.tensorflow.org/tutorials/load_data/images
+normalization_layer = tf.keras.layers.Rescaling(1./255)
+normalized_ds = train_ds.map(lambda x, y: (normalization_layer(x), y))
+image_batch, labels_batch = next(iter(normalized_ds))
+first_image = image_batch[0]
+print(np.min(first_image), np.max(first_image))
+
+#configure dataset for performance
+#prevent I/O blocking when calling data from disk
+#code source: https://www.tensorflow.org/tutorials/load_data/images
+AUTOTUNE = tf.data.AUTOTUNE
+
+train_ds = train_ds.cache().prefetch(buffer_size=AUTOTUNE)
+test_ds = test_ds.cache().prefetch(buffer_size=AUTOTUNE)
+
+#apply training now to the data using the model, use Adam optimizer and Sparse Categorical Cross Entropy for loss function, add some metrics of performance
+#SOURCE CODE: https://www.tensorflow.org/tutorials/load_data/images
+model.compile(
+  optimizer='adam',
+  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+  metrics=['accuracy'])
+
+x_s=[]
+y_s=[]
+for feature, label in test_ds:
+  x_s.append(feature)
+  y_s.append(label)
+x_s=x_s[:-1]
+y_s=y_s[:-1]
+
+model.fit(
+  train_ds,
+  validation_data=test_ds,
+  epochs=3
+)
+
+import matplotlib.pyplot as plt
+x = [1,2,3]
+y = [88.05, 94.32,  95.57]
+z = [0.34, 0.14, 0.11 ]
+
+fig, axs = plt.subplots(1, 2)
+axs[0].plot(x, y)
+axs[0].set_title('Accuracy of Resnet50 over 3 trials',fontsize = 8)
+axs[0].set(xlabel='Trial Number', ylabel='Accuracy [%]')
+
+axs[1].plot(x, z)
+axs[1].set_title('Loss Function of Resnet50 over 3 trials',fontsize = 8)
+axs[1].set(xlabel='Trial Number', ylabel='Loss [%]')
+
+plt.show()
